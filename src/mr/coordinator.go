@@ -7,18 +7,24 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
-type Coordinator struct {
-	// Your definitions here.
-	fileManager        *FileManager
-	taskIDCounter      int
-	taskIDCounterMutex sync.Mutex
-	files              []string
-	nReduce            int
+const taskTimeout = 10 * time.Second
 
-	ReduceTaskCounter      int
-	ReduceTaskCounterMutex sync.Mutex
+type taskState struct {
+	started time.Time
+	done    bool
+}
+
+type Coordinator struct {
+	mu          sync.Mutex
+	files       []string
+	nReduce     int
+	mapTasks    []taskState
+	reduceTasks []taskState
+	nMapDone    int
+	nReduceDone int
 }
 
 // create a Coordinator.
@@ -26,15 +32,11 @@ type Coordinator struct {
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator {
 	c := Coordinator{
-		fileManager: NewFileManager(),
 		files:       files,
 		nReduce:     nReduce,
+		mapTasks:    make([]taskState, len(files)),
+		reduceTasks: make([]taskState, nReduce),
 	}
-
-	c.fileManager.LoadFiles(files)
-	log.Printf("files loaded, len = %d", c.fileManager.FileAvailableLen())
-	// Your code here.
-
 	c.server(sockname)
 	return &c
 }
@@ -42,94 +44,73 @@ func MakeCoordinator(sockname string, files []string, nReduce int) *Coordinator 
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	// ret := false
-	log.Printf("FileAvailableLen()=%d, FileDoneLen()=%d, files=%d", c.fileManager.FileAvailableLen(), c.fileManager.FileDoneLen(), len(c.files))
-	// ret := c.fileManager.FileAvailableLen() <= 0 && c.fileManager.FileDoneLen() == len(c.files)
-	ret := c.fileManager.IsAllFilesDone() && c.currentReduceTaskCounterID() == len(c.files)
-
-	// Your code here.
-
-	return ret
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.nReduceDone == len(c.reduceTasks)
 }
 
-// Your code here -- RPC handlers for the worker to call.
-
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
 func (c *Coordinator) GetTask(args *GetTaskRequest, reply *GetTaskResponse) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	// check if Map jobs are done
-	if c.fileManager.IsAllFilesDone() {
-
-		//check if Reduce jobs are done, then shutdown
-		if c.currentReduceTaskCounterID() >= len(c.files) {
-			reply.Err = ErrShutdown.Error()
-			return nil
+	if c.nMapDone < len(c.mapTasks) {
+		if i := claim(c.mapTasks); i >= 0 {
+			reply.Task = Task{
+				ID:       i,
+				TaskType: TaskType_Map,
+				FileName: c.files[i],
+				NReduce:  c.nReduce,
+			}
+		} else {
+			reply.Err = ErrNoAvailabeFiles.Error()
 		}
-
-		return c.handleGetReduceTask(args, reply)
-
-	}
-	return c.handleGetMapTask(args, reply)
-
-}
-func (c *Coordinator) handleGetReduceTask(args *GetTaskRequest, reply *GetTaskResponse) error {
-	id := c.getNewTaskCounterID()
-	rid := c.getNewReduceTaskCounterID()
-	log.Printf("reduce task id: %d", rid)
-	reply.Task = Task{
-		ID:                 id,
-		TaskType:           TaskType_Reduce,
-		ReduceTaskIdBucket: rid,
-		TotalMapTasks:      len(c.files),
-	}
-	return nil
-}
-func (c *Coordinator) handleGetMapTask(args *GetTaskRequest, reply *GetTaskResponse) error {
-	file, err := c.fileManager.Poll()
-	if err != nil {
-		log.Printf("failed to poll file, %s", err)
-		reply.Err = err.Error()
 		return nil
 	}
 
-	id := c.getNewTaskCounterID()
-	log.Printf("file polled, file name: %s, id: %d", file, id)
-
-	reply.Task = Task{
-		ID:       id,
-		FileName: file,
-		NReduce:  c.nReduce,
-		TaskType: TaskType_Map,
+	if c.nReduceDone < len(c.reduceTasks) {
+		if i := claim(c.reduceTasks); i >= 0 {
+			reply.Task = Task{
+				ID:                 i,
+				TaskType:           TaskType_Reduce,
+				ReduceTaskIdBucket: i,
+				TotalMapTasks:      len(c.files),
+			}
+		} else {
+			reply.Err = ErrNoAvailabeFiles.Error()
+		}
+		return nil
 	}
+
+	reply.Err = ErrShutdown.Error()
 	return nil
 }
 
 func (c *Coordinator) TaskUpdate(args *TaskUpdateRequest, reply *TaskUpdateResponse) error {
-	log.Printf("task update, task id: %d", args.Task.ID)
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	c.fileManager.FileDone(args.Task.FileName)
+	tasks, nDone := c.mapTasks, &c.nMapDone
+	if args.Task.TaskType == TaskType_Reduce {
+		tasks, nDone = c.reduceTasks, &c.nReduceDone
+	}
+	id := args.Task.ID
+	if args.Done && id >= 0 && id < len(tasks) && !tasks[id].done {
+		tasks[id].done = true
+		*nDone++
+	}
+	reply.Ok = true
 	return nil
 }
 
-func (c *Coordinator) getNewTaskCounterID() int {
-	c.taskIDCounterMutex.Lock()
-	defer c.taskIDCounterMutex.Unlock()
-	c.taskIDCounter++
-	return c.taskIDCounter
-}
-
-func (c *Coordinator) getNewReduceTaskCounterID() int {
-	c.ReduceTaskCounterMutex.Lock()
-	defer c.ReduceTaskCounterMutex.Unlock()
-	c.ReduceTaskCounter++
-	return c.ReduceTaskCounter
-}
-func (c *Coordinator) currentReduceTaskCounterID() int {
-	c.ReduceTaskCounterMutex.Lock()
-	defer c.ReduceTaskCounterMutex.Unlock()
-	return c.ReduceTaskCounter
+func claim(tasks []taskState) int {
+	now := time.Now()
+	for i := range tasks {
+		if !tasks[i].done && now.Sub(tasks[i].started) > taskTimeout {
+			tasks[i].started = now
+			return i
+		}
+	}
+	return -1
 }
 
 // start a thread that listens for RPCs from worker.go

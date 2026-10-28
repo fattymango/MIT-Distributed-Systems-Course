@@ -46,24 +46,22 @@ func Worker(sockname string, mapf func(string, string) []KeyValue,
 				log.Printf("received shutdown signal\n")
 				os.Exit(0)
 			default:
-				log.Printf("received error: %s\n", err.Error())
-				time.Sleep(1 * time.Second)
+				time.Sleep(200 * time.Millisecond)
 				continue
 			}
 		}
 
-		log.Printf("processing task: id=%d, file=%s, type=%s\n", task.ID, task.FileName, task.TaskType)
-
 		switch task.TaskType {
 		case TaskType_Map:
 			if err := processFile(task.FileName, task.ID, task.NReduce, mapf); err != nil {
-				log.Printf("error processing file: %s\n", err.Error())
+				log.Printf("map task %d failed: %s\n", task.ID, err)
+				continue
 			}
 			CallTaskUpdate(task)
 		case TaskType_Reduce:
-			log.Printf("processing reduce task: id=%d\n", task.ReduceTaskIdBucket)
 			if err := reduce(task.ReduceTaskIdBucket, task.TotalMapTasks, reducef); err != nil {
-				log.Printf("error processing file: %s\n", err.Error())
+				log.Printf("reduce task %d failed: %s\n", task.ID, err)
+				continue
 			}
 			CallTaskUpdate(task)
 		default:
@@ -227,7 +225,6 @@ func CallGetTask() (*Task, error) {
 		return nil, ErrCallFailed
 	}
 
-	fmt.Printf("GetTask: %v\n", reply)
 	if reply.Err != "" {
 		return nil, errors.New(reply.Err)
 	}
