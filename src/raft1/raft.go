@@ -224,6 +224,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+	XTerm   int
+	XIndex  int
+	XLen    int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -246,7 +249,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimeout = rf.newElectionTimeout()
 	reply.Term = rf.currentTerm
 	reply.Success = false
-	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if args.PrevLogIndex >= len(rf.log) {
+		reply.XTerm = -1
+		reply.XLen = len(rf.log)
+		rf.persist()
+		return
+	}
+	if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.XTerm = rf.log[args.PrevLogIndex].Term
+		i := args.PrevLogIndex
+		for i > 1 && rf.log[i-1].Term == reply.XTerm {
+			i--
+		}
+		reply.XIndex = i
 		rf.persist()
 		return
 	}
@@ -370,7 +385,17 @@ func (rf *Raft) StartHeartBeat() {
 					rf.nextIndex[i] = rf.matchIndex[i] + 1
 					rf.advanceCommitIndex()
 				} else {
-					rf.nextIndex[i]--
+					if reply.XTerm == -1 {
+						rf.nextIndex[i] = reply.XLen
+					} else {
+						rf.nextIndex[i] = reply.XIndex
+						for k := len(rf.log) - 1; k > 0; k-- {
+							if rf.log[k].Term == reply.XTerm {
+								rf.nextIndex[i] = k + 1
+								break
+							}
+						}
+					}
 					if rf.nextIndex[i] < 1 {
 						rf.nextIndex[i] = 1
 					}
