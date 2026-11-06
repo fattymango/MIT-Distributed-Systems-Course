@@ -9,11 +9,13 @@ package raft
 
 import (
 	//	"bytes"
+	"bytes"
 	"math/rand"
 	"sync"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -80,12 +82,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (3C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -95,17 +98,18 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (3C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int
+	var logEntries []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logEntries) != nil {
+		panic("decode error")
+
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = logEntries
+	}
 }
 
 // how many bytes in Raft's persisted log?
@@ -150,6 +154,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		rf.persist()
 		return
 	}
 
@@ -172,6 +177,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.lastHeard = time.Now()
 		rf.electionTimeout = rf.newElectionTimeout()
 	}
+	rf.persist()
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -241,6 +247,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		rf.persist()
 		return
 	}
 	for k, entry := range args.Entries {
@@ -267,8 +274,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		rf.applyCond.Broadcast()
 	}
-
 	reply.Success = true
+	rf.persist()
 
 }
 
@@ -350,6 +357,7 @@ func (rf *Raft) StartHeartBeat() {
 					rf.votedFor = -1
 					rf.lastHeard = time.Now()
 					rf.electionTimeout = rf.newElectionTimeout()
+					rf.persist()
 					return
 				}
 
@@ -402,6 +410,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.matchIndex[rf.me] = index
 	term = rf.currentTerm
 	isLeader = true
+	rf.persist()
 	return index, term, isLeader
 }
 
@@ -442,7 +451,7 @@ func (rf *Raft) startElections() {
 	rf.votedFor = rf.me
 	rf.lastHeard = time.Now()
 	rf.electionTimeout = rf.newElectionTimeout()
-
+	rf.persist()
 	lastLogIndex := len(rf.log) - 1
 	req := &RequestVoteArgs{
 		Term:         rf.currentTerm,
@@ -468,6 +477,7 @@ func (rf *Raft) startElections() {
 				rf.currentTerm = resp.Term
 				rf.state = RaftState_Follower
 				rf.votedFor = -1
+				rf.persist()
 				return
 			}
 
