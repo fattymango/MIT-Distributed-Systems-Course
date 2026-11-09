@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"sync"
 
 	"6.5840/kvraft1/rsm"
@@ -10,16 +11,16 @@ import (
 	tester "6.5840/tester1"
 )
 
-type value struct {
-	value   string
-	version rpc.Tversion
+type Value struct {
+	Value   string
+	Version rpc.Tversion
 }
 type KVServer struct {
 	me  int
 	rsm *rsm.RSM
 
 	// Your definitions here.
-	store map[string]value
+	store map[string]Value
 	mu    sync.Mutex
 }
 
@@ -44,8 +45,8 @@ func (kv *KVServer) doGet(args *rpc.GetArgs) *rpc.GetReply {
 	defer kv.mu.Unlock()
 	reply := &rpc.GetReply{}
 	if v, ok := kv.store[args.Key]; ok {
-		reply.Value = v.value
-		reply.Version = v.version
+		reply.Value = v.Value
+		reply.Version = v.Version
 		reply.Err = rpc.OK
 		return reply
 	}
@@ -59,8 +60,8 @@ func (kv *KVServer) doPut(args *rpc.PutArgs) *rpc.PutReply {
 	defer kv.mu.Unlock()
 	reply := &rpc.PutReply{}
 	if v, ok := kv.store[args.Key]; ok {
-		if args.Version == v.version {
-			kv.store[args.Key] = value{value: args.Value, version: args.Version + 1}
+		if args.Version == v.Version {
+			kv.store[args.Key] = Value{Value: args.Value, Version: args.Version + 1}
 			reply.Err = rpc.OK
 			return reply
 		}
@@ -69,7 +70,7 @@ func (kv *KVServer) doPut(args *rpc.PutArgs) *rpc.PutReply {
 	}
 
 	if args.Version == 0 {
-		kv.store[args.Key] = value{value: args.Value, version: 1}
+		kv.store[args.Key] = Value{Value: args.Value, Version: 1}
 		reply.Err = rpc.OK
 		return reply
 	}
@@ -79,11 +80,26 @@ func (kv *KVServer) doPut(args *rpc.PutArgs) *rpc.PutReply {
 }
 func (kv *KVServer) Snapshot() []byte {
 	// Your code here
-	return nil
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	w := new(bytes.Buffer)
+	encoder := labgob.NewEncoder(w)
+	encoder.Encode(kv.store)
+	return w.Bytes()
 }
 
 func (kv *KVServer) Restore(data []byte) {
-	// Your code here
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	r := bytes.NewBuffer(data)
+	decoder := labgob.NewDecoder(r)
+
+	var newStore map[string]Value
+	if err := decoder.Decode(&newStore); err != nil {
+		panic(err)
+	}
+	kv.store = newStore
 }
 
 func (kv *KVServer) Get(args *rpc.GetArgs, reply *rpc.GetReply) {
@@ -136,9 +152,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, gid tester.Tgid, me int, persist
 
 	kv := &KVServer{me: me}
 
+	kv.store = make(map[string]Value)
 	kv.rsm = rsm.MakeRSM(servers, me, persister, maxraftstate, kv)
 	// You may need initialization code here.
-	kv.store = make(map[string]value)
 	return []any{kv, kv.rsm.Raft()}
 }
 

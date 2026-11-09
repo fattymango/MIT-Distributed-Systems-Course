@@ -81,18 +81,32 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
 	labgob.Register(Op{})
+	s := persister.ReadSnapshot()
+	if len(s) > 0 {
+		rsm.sm.Restore(s)
+	}
 	go rsm.reader()
 	return rsm
 }
 
 func (rsm *RSM) reader() {
 	for msg := range rsm.applyCh {
+		if msg.SnapshotValid {
+			rsm.sm.Restore(msg.Snapshot)
+			continue
+		}
+
 		op, ok := msg.Command.(Op)
 		if !ok {
 			continue
-			//  (fmt.Sprintf("invalid type casting %v", msg.Command))
 		}
+
 		res := rsm.sm.DoOp(op.Command)
+
+		if rsm.maxraftstate != -1 && rsm.rf.PersistBytes() >= rsm.maxraftstate {
+			rsm.rf.Snapshot(msg.CommandIndex, rsm.sm.Snapshot())
+		}
+
 		rsm.mu.Lock()
 		if w, ok := rsm.waiterMap[msg.CommandIndex]; ok {
 			w.ch <- OpResult{
@@ -100,8 +114,6 @@ func (rsm *RSM) reader() {
 				Result:    res,
 			}
 			delete(rsm.waiterMap, msg.CommandIndex)
-			rsm.mu.Unlock()
-			continue
 		}
 		rsm.mu.Unlock()
 	}
