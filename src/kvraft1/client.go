@@ -1,16 +1,17 @@
 package kvraft
 
 import (
-	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
-	"6.5840/tester1"
-)
+	"time"
 
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
+	tester "6.5840/tester1"
+)
 
 type Clerk struct {
 	clnt    *tester.Clnt
 	servers []string
-	leader int // last successful leader (index into servers[])
+	leader  int // last successful leader (index into servers[])
 	// You can add to this struct.
 }
 
@@ -35,9 +36,21 @@ func (ck *Clerk) Leader() int {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
-
 	// You will have to modify this function.
-	return "", 0, ""
+	args := rpc.GetArgs{Key: key}
+	server := ck.leader
+	for {
+		reply := rpc.GetReply{}
+		ok := ck.clnt.Call(ck.servers[server], "KVServer.Get", &args, &reply)
+		if !ok || reply.Err == rpc.ErrWrongLeader {
+			server = (server + 1) % len(ck.servers)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		ck.leader = server
+		return reply.Value, reply.Version, reply.Err
+
+	}
 }
 
 // Put updates key with value only if the version in the
@@ -58,6 +71,28 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 // must match the declared types of the RPC handler function's
 // arguments. Additionally, reply must be passed as a pointer.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
-	// You will have to modify this function.
-	return ""
+	args := rpc.PutArgs{Key: key, Value: value, Version: version}
+	server := ck.leader
+	sentBefore := false
+
+	for {
+		reply := rpc.PutReply{}
+		ok := ck.clnt.Call(ck.servers[server], "KVServer.Put", &args, &reply)
+		if ok {
+			switch reply.Err {
+			case rpc.OK, rpc.ErrNoKey:
+				ck.leader = server
+				return reply.Err
+			case rpc.ErrVersion:
+				ck.leader = server
+				if sentBefore {
+					return rpc.ErrMaybe
+				}
+				return rpc.ErrVersion
+			}
+		}
+		sentBefore = true
+		server = (server + 1) % len(ck.servers)
+		time.Sleep(100 * time.Millisecond)
+	}
 }
