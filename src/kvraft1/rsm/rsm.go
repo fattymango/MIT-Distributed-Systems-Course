@@ -1,22 +1,26 @@
 package rsm
 
 import (
+	"math/rand/v2"
 	"sync"
+	"time"
 
 	"6.5840/kvsrv1/rpc"
+	"6.5840/labgob"
 	"6.5840/labrpc"
-	"6.5840/raft1"
+	raft "6.5840/raft1"
 	"6.5840/raftapi"
-	"6.5840/tester1"
-
+	tester "6.5840/tester1"
 )
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	ServerID  int
+	RequestID int64
+	Command   interface{}
 }
-
 
 // A server (i.e., ../server.go) that wants to replicate itself calls
 // MakeRSM and must implement the StateMachine interface.  This
@@ -30,6 +34,15 @@ type StateMachine interface {
 	Restore([]byte)
 }
 
+type OpResult struct {
+	RequestID int64
+	Result    interface{}
+}
+type Waiter struct {
+	RequestID int64
+	Term      int
+	ch        chan OpResult
+}
 type RSM struct {
 	mu           sync.Mutex
 	me           int
@@ -38,6 +51,7 @@ type RSM struct {
 	maxraftstate int // snapshot if log grows this big
 	sm           StateMachine
 	// Your definitions here.
+	waiterMap map[int]Waiter
 }
 
 // servers[] contains the ports of the set of
@@ -61,17 +75,50 @@ func MakeRSM(servers []*labrpc.ClientEnd, me int, persister *tester.Persister, m
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raftapi.ApplyMsg),
 		sm:           sm,
+		waiterMap:    make(map[int]Waiter),
 	}
 	if !tester.UseRaftStateMachine {
 		rsm.rf = raft.Make(servers, me, persister, rsm.applyCh)
 	}
+	labgob.Register(Op{})
+	go rsm.reader()
 	return rsm
+}
+
+func (rsm *RSM) reader() {
+	for msg := range rsm.applyCh {
+		op, ok := msg.Command.(Op)
+		if !ok {
+			continue
+			//  (fmt.Sprintf("invalid type casting %v", msg.Command))
+		}
+		res := rsm.sm.DoOp(op.Command)
+		rsm.mu.Lock()
+		if w, ok := rsm.waiterMap[msg.CommandIndex]; ok {
+			w.ch <- OpResult{
+				RequestID: op.RequestID,
+				Result:    res,
+			}
+			delete(rsm.waiterMap, msg.CommandIndex)
+			rsm.mu.Unlock()
+			continue
+		}
+		rsm.mu.Unlock()
+	}
+	rsm.mu.Lock()
+	for _, w := range rsm.waiterMap {
+		w.ch <- OpResult{
+			RequestID: -1,
+			Result:    nil,
+		}
+	}
+	rsm.waiterMap = make(map[int]Waiter)
+	rsm.mu.Unlock()
 }
 
 func (rsm *RSM) Raft() raftapi.Raft {
 	return rsm.rf
 }
-
 
 // Submit a command to Raft, and wait for it to be committed.  It
 // should return ErrWrongLeader if client should find new leader and
@@ -83,5 +130,49 @@ func (rsm *RSM) Submit(req any) (rpc.Err, any) {
 	// is the argument to Submit and id is a unique id for the op.
 
 	// your code here
+
+	op := Op{
+		ServerID:  rsm.me,
+		RequestID: rand.Int64(),
+		Command:   req,
+	}
+	rsm.mu.Lock()
+	index, term, ok := rsm.rf.Start(op)
+	if !ok {
+		rsm.mu.Unlock()
+		return rpc.ErrWrongLeader, nil
+	}
+	w := Waiter{
+		RequestID: op.RequestID,
+		Term:      term,
+		ch:        make(chan OpResult, 1),
+	}
+	rsm.waiterMap[index] = w
+	rsm.mu.Unlock()
+	ticker := time.NewTicker(time.Millisecond * 50)
+	defer ticker.Stop()
+	for {
+		select {
+		case res := <-w.ch:
+			if res.RequestID == op.RequestID {
+				return rpc.OK, res.Result
+			}
+			return rpc.ErrWrongLeader, nil
+		case <-ticker.C:
+			currentTerm, ok := rsm.rf.GetState()
+
+			if !ok || currentTerm != term {
+				rsm.mu.Lock()
+				if entry, ok := rsm.waiterMap[index]; ok {
+					if entry.RequestID == op.RequestID {
+						delete(rsm.waiterMap, index)
+					}
+				}
+				rsm.mu.Unlock()
+				return rpc.ErrWrongLeader, nil
+			}
+		}
+	}
+
 	return rpc.ErrWrongLeader, nil // i'm dead, try another server.
 }
