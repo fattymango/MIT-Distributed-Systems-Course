@@ -63,6 +63,7 @@ type Raft struct {
 	lastIncludedTerm  int
 	snapshot          []byte
 	pendingSnapshot   bool
+	replicateCh       chan struct{}
 }
 
 func (rf *Raft) lastIndex() int {
@@ -489,7 +490,10 @@ func (rf *Raft) StartHeartBeat() {
 		}
 		rf.mu.Unlock()
 
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-time.After(100 * time.Millisecond):
+		case <-rf.replicateCh:
+		}
 	}
 }
 
@@ -592,6 +596,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := rf.lastIndex()
 	rf.matchIndex[rf.me] = index
 	rf.persist()
+
+	select {
+	case rf.replicateCh <- struct{}{}:
+	default:
+	}
+
 	return index, rf.currentTerm, true
 }
 
@@ -727,6 +737,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	rf.applyCond = sync.NewCond(&rf.mu)
+	rf.replicateCh = make(chan struct{}, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
