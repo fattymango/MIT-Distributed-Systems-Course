@@ -5,13 +5,19 @@ package shardctrler
 //
 
 import (
+	"fmt"
 
-	"6.5840/kvsrv1"
-	"6.5840/kvtest1"
+	kvsrv "6.5840/kvsrv1"
+	"6.5840/kvsrv1/rpc"
+	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardcfg"
-	"6.5840/tester1"
+	"6.5840/shardkv1/shardgrp"
+	tester "6.5840/tester1"
 )
 
+const (
+	CONFIG_KEY = "CONFIG_KEY"
+)
 
 // ShardCtrler for the controller and kv clerk.
 type ShardCtrler struct {
@@ -21,6 +27,7 @@ type ShardCtrler struct {
 	killed int32 // set by Kill()
 
 	// Your data here.
+
 }
 
 // Make a ShardCltler, which stores its state in a kvsrv.
@@ -45,6 +52,7 @@ func (sck *ShardCtrler) InitController() {
 // lists shardgrp shardcfg.Gid1 for all shards.
 func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 	// Your code here
+	sck.Put(CONFIG_KEY, cfg.String(), 0)
 }
 
 // Called by the tester to ask the controller to change the
@@ -53,12 +61,34 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	// Your code here.
-}
+	value, version, err := sck.Get(CONFIG_KEY)
+	if err != rpc.OK {
+		panic(err)
+	}
+	old := shardcfg.FromString(value)
+	for s := 0; s < shardcfg.NShards; s++ {
+		oldGid, oldSrvs, _ := old.GidServers(shardcfg.Tshid(s))
+		newGid, newSrvs, _ := new.GidServers(shardcfg.Tshid(s))
+		if oldGid == newGid {
+			continue
+		}
+		oldCk := shardgrp.MakeClerk(sck.clnt, oldSrvs)
+		newCk := shardgrp.MakeClerk(sck.clnt, newSrvs)
+		state, _ := oldCk.FreezeShard(shardcfg.Tshid(s), new.Num)
+		newCk.InstallShard(shardcfg.Tshid(s), state, new.Num)
+		oldCk.DeleteShard(shardcfg.Tshid(s), new.Num)
+	}
+	sck.Put(CONFIG_KEY, new.String(), version)
 
+}
 
 // Return the current configuration
 func (sck *ShardCtrler) Query() *shardcfg.ShardConfig {
 	// Your code here.
-	return nil
-}
+	config, _, err := sck.Get(CONFIG_KEY)
+	if err != rpc.OK {
+		panic(fmt.Sprintf("error getting config: %v", err))
+	}
 
+	return shardcfg.FromString(config)
+}

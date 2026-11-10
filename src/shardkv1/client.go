@@ -9,18 +9,21 @@ package shardkv
 //
 
 import (
+	"time"
+
+	"6.5840/shardkv1/shardcfg"
 	"6.5840/shardkv1/shardgrp"
 
 	"6.5840/kvsrv1/rpc"
-	"6.5840/kvtest1"
+	kvtest "6.5840/kvtest1"
 	"6.5840/shardkv1/shardctrler"
-	"6.5840/tester1"
+	tester "6.5840/tester1"
 )
 
 type Clerk struct {
 	clnt *tester.Clnt
 	sck  *shardctrler.ShardCtrler
-	rcks   map[tester.Tgid]*shardgrp.Clerk
+	rcks map[tester.Tgid]*shardgrp.Clerk
 	// You will have to modify this struct.
 }
 
@@ -41,7 +44,6 @@ func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 	return rck, ok
 }
 
-
 // Get a key from a shardgrp.  You can use shardcfg.Key2Shard(key) to
 // find the shard responsible for the key and ck.sck.Query() to read
 // the current configuration and lookup the servers in the group
@@ -49,11 +51,52 @@ func (ck *Clerk) GetClerk(gid tester.Tgid) (*shardgrp.Clerk, bool) {
 // calling shardgrp.MakeClerk(ck.clnt, servers).
 func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 	// You will have to modify this function.
-	return "", 0, ""
+
+	for {
+		cfg := ck.sck.Query()
+		shard := shardcfg.Key2Shard(key)
+		gid, srvs, ok := cfg.GidServers(shard)
+		if !ok {
+			time.Sleep(100 * time.Millisecond)
+
+			continue
+		}
+		if c, ok := ck.rcks[gid]; ok {
+			resp, version, err := c.Get(key)
+			if err == rpc.ErrWrongGroup {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return resp, version, err
+		}
+		ck.rcks[gid] = shardgrp.MakeClerk(ck.clnt, srvs)
+	}
 }
 
 // Put a key to a shard group.
 func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 	// You will have to modify this function.
-	return ""
+	retried := false
+	for {
+		cfg := ck.sck.Query()
+		shard := shardcfg.Key2Shard(key)
+		gid, srvs, ok := cfg.GidServers(shard)
+		if !ok {
+			time.Sleep(100 * time.Millisecond)
+
+			continue
+		}
+		if c, ok := ck.rcks[gid]; ok {
+			err := c.Put(key, value, version)
+			if err == rpc.ErrWrongGroup {
+				retried = true
+				time.Sleep(100 * time.Millisecond)
+				continue
+			} else if err == rpc.ErrVersion && retried {
+				return rpc.ErrMaybe
+			}
+			return err
+		}
+		ck.rcks[gid] = shardgrp.MakeClerk(ck.clnt, srvs)
+	}
 }
