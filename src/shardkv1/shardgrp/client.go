@@ -37,8 +37,8 @@ func (ck *Clerk) Get(key string) (string, rpc.Tversion, rpc.Err) {
 			server = (server + 1) % len(ck.servers)
 			if server == 0 {
 				rounds++
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		ck.leader = server
@@ -76,8 +76,8 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		server = (server + 1) % len(ck.servers)
 		if server == 0 {
 			rounds++
+			time.Sleep(100 * time.Millisecond)
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 
 	return rpc.ErrWrongGroup
@@ -95,8 +95,8 @@ func (ck *Clerk) FreezeShard(s shardcfg.Tshid, num shardcfg.Tnum) ([]byte, rpc.E
 			server = (server + 1) % len(ck.servers)
 			if server == 0 {
 				rounds++
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		ck.leader = server
@@ -118,8 +118,8 @@ func (ck *Clerk) InstallShard(s shardcfg.Tshid, state []byte, num shardcfg.Tnum)
 			server = (server + 1) % len(ck.servers)
 			if server == 0 {
 				rounds++
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		ck.leader = server
@@ -141,8 +141,8 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 			server = (server + 1) % len(ck.servers)
 			if server == 0 {
 				rounds++
+				time.Sleep(100 * time.Millisecond)
 			}
-			time.Sleep(100 * time.Millisecond)
 			continue
 		}
 		ck.leader = server

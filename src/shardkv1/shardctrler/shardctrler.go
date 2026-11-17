@@ -6,6 +6,7 @@ package shardctrler
 
 import (
 	"fmt"
+	"time"
 
 	kvsrv "6.5840/kvsrv1"
 	"6.5840/kvsrv1/rpc"
@@ -16,7 +17,8 @@ import (
 )
 
 const (
-	CONFIG_KEY = "CONFIG_KEY"
+	CONFIG_KEY      = "CONFIG_KEY"
+	NEXT_CONFIG_KEY = "NEXT_CONFIG_KEY"
 )
 
 // ShardCtrler for the controller and kv clerk.
@@ -43,6 +45,23 @@ func MakeShardCtrler(clnt *tester.Clnt) *ShardCtrler {
 // controller. In part A, this method doesn't need to do anything. In
 // B and C, this method implements recovery.
 func (sck *ShardCtrler) InitController() {
+	currValue, currVersion, err := sck.Get(CONFIG_KEY)
+	if err == rpc.ErrNoKey {
+		return
+	}
+
+	nextValue, _, err := sck.Get(NEXT_CONFIG_KEY)
+	if err == rpc.ErrNoKey {
+		return
+	}
+
+	curr := shardcfg.FromString(currValue)
+	next := shardcfg.FromString(nextValue)
+
+	if curr.Num < next.Num {
+		sck.moveShards(curr, next)
+		sck.Put(CONFIG_KEY, next.String(), currVersion)
+	}
 }
 
 // Called once by the tester to supply the first configuration.  You
@@ -61,25 +80,62 @@ func (sck *ShardCtrler) InitConfig(cfg *shardcfg.ShardConfig) {
 // controller.
 func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 	// Your code here.
-	value, version, err := sck.Get(CONFIG_KEY)
+	value, configVersion, err := sck.Get(CONFIG_KEY)
 	if err != rpc.OK {
 		panic(err)
 	}
+
 	old := shardcfg.FromString(value)
+	value, newVersion, err := sck.Get(NEXT_CONFIG_KEY)
+	err = sck.Put(NEXT_CONFIG_KEY, new.String(), newVersion)
+	sck.moveShards(old, new)
+	sck.Put(CONFIG_KEY, new.String(), configVersion)
+}
+
+func (sck *ShardCtrler) moveShards(old, new *shardcfg.ShardConfig) {
+	loopUntilSuccess := func(fn func() rpc.Err, duration time.Duration) {
+		for {
+			err := fn()
+			if err == rpc.OK {
+				return
+			}
+			time.Sleep(duration)
+		}
+	}
+	clkMap := make(map[tester.Tgid]*shardgrp.Clerk, 0)
 	for s := 0; s < shardcfg.NShards; s++ {
 		oldGid, oldSrvs, _ := old.GidServers(shardcfg.Tshid(s))
 		newGid, newSrvs, _ := new.GidServers(shardcfg.Tshid(s))
 		if oldGid == newGid {
 			continue
 		}
-		oldCk := shardgrp.MakeClerk(sck.clnt, oldSrvs)
-		newCk := shardgrp.MakeClerk(sck.clnt, newSrvs)
-		state, _ := oldCk.FreezeShard(shardcfg.Tshid(s), new.Num)
-		newCk.InstallShard(shardcfg.Tshid(s), state, new.Num)
-		oldCk.DeleteShard(shardcfg.Tshid(s), new.Num)
-	}
-	sck.Put(CONFIG_KEY, new.String(), version)
+		oldCk, ok := clkMap[oldGid]
+		if !ok {
+			oldCk = shardgrp.MakeClerk(sck.clnt, oldSrvs)
+			clkMap[oldGid] = oldCk
+		}
 
+		newCk, ok := clkMap[newGid]
+		if !ok {
+			newCk = shardgrp.MakeClerk(sck.clnt, newSrvs)
+			clkMap[newGid] = newCk
+		}
+		var state []byte
+		statefn := func() rpc.Err {
+			st, err := oldCk.FreezeShard(shardcfg.Tshid(s), new.Num)
+			state = st
+			return err
+		}
+		loopUntilSuccess(statefn, 100*time.Millisecond)
+
+		loopUntilSuccess(func() rpc.Err {
+			return newCk.InstallShard(shardcfg.Tshid(s), state, new.Num)
+		}, 100*time.Millisecond)
+
+		loopUntilSuccess(func() rpc.Err {
+			return oldCk.DeleteShard(shardcfg.Tshid(s), new.Num)
+		}, 100*time.Millisecond)
+	}
 }
 
 // Return the current configuration
