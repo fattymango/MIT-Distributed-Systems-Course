@@ -85,19 +85,42 @@ func (sck *ShardCtrler) ChangeConfigTo(new *shardcfg.ShardConfig) {
 		panic(err)
 	}
 
-	old := shardcfg.FromString(value)
+	current := shardcfg.FromString(value)
+	if new.Num-current.Num != 1 {
+		return
+	}
 	value, newVersion, err := sck.Get(NEXT_CONFIG_KEY)
+	if err == rpc.OK {
+		next := shardcfg.FromString(value)
+		if next.Num >= new.Num {
+			return
+		}
+	} else if err != rpc.ErrNoKey {
+		return
+	}
 	err = sck.Put(NEXT_CONFIG_KEY, new.String(), newVersion)
-	sck.moveShards(old, new)
+	switch err {
+	case rpc.ErrVersion:
+		return
+	case rpc.ErrMaybe:
+		value, _, _ := sck.Get(NEXT_CONFIG_KEY)
+		if value != new.String() {
+			return
+		}
+	}
+	sck.moveShards(current, new)
 	sck.Put(CONFIG_KEY, new.String(), configVersion)
 }
 
 func (sck *ShardCtrler) moveShards(old, new *shardcfg.ShardConfig) {
-	loopUntilSuccess := func(fn func() rpc.Err, duration time.Duration) {
+	loopUntilSuccess := func(fn func() rpc.Err, duration time.Duration) bool {
 		for {
 			err := fn()
 			if err == rpc.OK {
-				return
+				return true
+			}
+			if sck.Query().Num >= new.Num {
+				return false
 			}
 			time.Sleep(duration)
 		}
@@ -121,20 +144,26 @@ func (sck *ShardCtrler) moveShards(old, new *shardcfg.ShardConfig) {
 			clkMap[newGid] = newCk
 		}
 		var state []byte
-		statefn := func() rpc.Err {
+		freezeStatefn := func() rpc.Err {
 			st, err := oldCk.FreezeShard(shardcfg.Tshid(s), new.Num)
 			state = st
 			return err
 		}
-		loopUntilSuccess(statefn, 100*time.Millisecond)
+		if !loopUntilSuccess(freezeStatefn, 100*time.Millisecond) {
+			return
+		}
 
-		loopUntilSuccess(func() rpc.Err {
+		if !loopUntilSuccess(func() rpc.Err {
 			return newCk.InstallShard(shardcfg.Tshid(s), state, new.Num)
-		}, 100*time.Millisecond)
+		}, 100*time.Millisecond) {
+			return
+		}
 
-		loopUntilSuccess(func() rpc.Err {
+		if !loopUntilSuccess(func() rpc.Err {
 			return oldCk.DeleteShard(shardcfg.Tshid(s), new.Num)
-		}, 100*time.Millisecond)
+		}, 100*time.Millisecond) {
+			return
+		}
 	}
 }
 
