@@ -14,6 +14,10 @@ const (
 	// For future kvraft lab
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrWrongGroup  = "ErrWrongGroup"
+
+	// For Transactions
+	TxnGet = "Get"
+	TxnPut = "Put"
 )
 
 type Tversion uint64
@@ -38,3 +42,32 @@ type GetReply struct {
 	Err     Err
 }
 
+type TxnCompare struct {
+	Key     string
+	Version Tversion
+}
+
+type TxnOp struct {
+	Type  string
+	Key   string
+	Value string
+}
+
+type TxnOpResult struct {
+	Value   string
+	Version Tversion
+	Err     Err
+}
+type TxnArgs struct {
+	ClientId int64
+	Seq      int64
+	Compares []TxnCompare
+	Then     []TxnOp
+	Else     []TxnOp
+}
+
+type TxnReply struct {
+	Err       Err
+	Succeeded bool
+	Results   []TxnOpResult
+}

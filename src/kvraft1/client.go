@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"math/rand/v2"
 	"time"
 
 	"6.5840/kvsrv1/rpc"
@@ -13,11 +14,14 @@ type Clerk struct {
 	servers []string
 	leader  int // last successful leader (index into servers[])
 	// You can add to this struct.
+	clientID int64
+	seq      int64
 }
 
 func MakeClerk(clnt *tester.Clnt, servers []string) kvtest.IKVClerk {
 	ck := &Clerk{clnt: clnt, servers: servers}
 	// You'll have to add code here.
+	ck.clientID = rand.Int64()
 	return ck
 }
 
@@ -94,5 +98,29 @@ func (ck *Clerk) Put(key string, value string, version rpc.Tversion) rpc.Err {
 		sentBefore = true
 		server = (server + 1) % len(ck.servers)
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (ck *Clerk) Txn(compares []rpc.TxnCompare, then, els []rpc.TxnOp) rpc.TxnReply {
+	ck.seq++
+	args := rpc.TxnArgs{
+		ClientId: ck.clientID,
+		Seq:      ck.seq,
+		Compares: compares,
+		Then:     then,
+		Else:     els,
+	}
+
+	server := ck.leader
+	for {
+		reply := rpc.TxnReply{}
+		ok := ck.clnt.Call(ck.servers[server], "KVServer.Txn", &args, &reply)
+		if !ok || reply.Err == rpc.ErrWrongLeader {
+			server = (server + 1) % len(ck.servers)
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		ck.leader = server
+		return reply
 	}
 }
