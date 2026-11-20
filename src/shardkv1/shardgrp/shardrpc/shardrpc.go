@@ -5,6 +5,14 @@ import (
 	"6.5840/shardkv1/shardcfg"
 )
 
+const (
+	VoteOK        = "OK"
+	VoteConflict  = "Conflict"
+	DecisionThen  = "THEN"
+	DecisionElse  = "ELSE"
+	DecisionAbort = "ABORT"
+)
+
 type FreezeShardArgs struct {
 	Shard shardcfg.Tshid
 	Num   shardcfg.Tnum
@@ -33,4 +41,27 @@ type DeleteShardArgs struct {
 
 type DeleteShardReply struct {
 	Err rpc.Err
+}
+
+type TxnPrepareArgs struct {
+	TxnID    string
+	Shard    shardcfg.Tshid
+	Compares []rpc.TxnCompare
+	Then     []rpc.TxnOp
+	Else     []rpc.TxnOp
+}
+type TxnPrepareReply struct {
+	Err    rpc.Err
+	Vote   string
+	CmpOK  bool
+	Holder string
+}
+type TxnFinishArgs struct {
+	TxnID    string
+	Shard    shardcfg.Tshid
+	Decision string
+}
+type TxnFinishReply struct {
+	Err     rpc.Err
+	Results []rpc.TxnOpResult
 }

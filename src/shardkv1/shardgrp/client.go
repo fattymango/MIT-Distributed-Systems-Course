@@ -152,3 +152,49 @@ func (ck *Clerk) DeleteShard(s shardcfg.Tshid, num shardcfg.Tnum) rpc.Err {
 	return rpc.ErrWrongGroup
 
 }
+
+func (ck *Clerk) TxnPrepare(args shardrpc.TxnPrepareArgs) shardrpc.TxnPrepareReply {
+	// Your code here
+	server := ck.leader
+	rounds := 0
+	for rounds < 3 {
+		reply := shardrpc.TxnPrepareReply{}
+		ok := ck.Call(ck.servers[server], "KVServer.TxnPrepare", &args, &reply)
+		if !ok || reply.Err == rpc.ErrWrongLeader {
+			server = (server + 1) % len(ck.servers)
+			if server == 0 {
+				rounds++
+				time.Sleep(100 * time.Millisecond)
+			}
+			continue
+		}
+		ck.leader = server
+		return reply
+
+	}
+	return shardrpc.TxnPrepareReply{Err: rpc.ErrWrongGroup}
+
+}
+
+func (ck *Clerk) TxnFinish(args shardrpc.TxnFinishArgs) shardrpc.TxnFinishReply {
+	// Your code here
+	server := ck.leader
+	rounds := 0
+	for rounds < 3 {
+		reply := shardrpc.TxnFinishReply{}
+		ok := ck.Call(ck.servers[server], "KVServer.TxnFinish", &args, &reply)
+		if !ok || reply.Err == rpc.ErrWrongLeader {
+			server = (server + 1) % len(ck.servers)
+			if server == 0 {
+				rounds++
+				time.Sleep(100 * time.Millisecond)
+			}
+			continue
+		}
+		ck.leader = server
+		return reply
+
+	}
+	return shardrpc.TxnFinishReply{Err: rpc.ErrWrongGroup}
+
+}
